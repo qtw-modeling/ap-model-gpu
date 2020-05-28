@@ -19,8 +19,9 @@ using namespace std;
 typedef double real;
 
 //---------------------------------- grid parameters
-#define numSegmentsX 20
-#define numSegmentsY 20
+// FOR DEBUG: 2x2 == 3 cells x 3 cells, with 1 active cell in center other cells being ghosts
+#define numSegmentsX 30 // 20 
+#define numSegmentsY 30 // 20
 #define numPointsX (numSegmentsX + 1)
 #define numPointsY (numSegmentsY + 1)
 #define numPointsTotal (numPointsX * numPointsY)
@@ -28,8 +29,13 @@ typedef double real;
 #define hy 0.07 // same as for YNI model // (1./numSegmentsY)
 
 #define SCALING_FACTOR 12.9
+#define APD0 (330.) // in (ms)
+#define LongitudeStim (APD0)
+#define PeriodStim (LongitudeStim*2.) // in (ms) //APD0
+//#define i_Stim0 (0.1/1) // for varying stim current value in various places of the programm
 
-#define T 600. // endtime in (ms)
+
+#define T 7000. // endtime in (ms)
 #define dt 0.005 //0.005 // timestep in (ms)
 //#define dtOutput 5. // in (ms)
 // (dtOutput/dt) must be an integer number!
@@ -45,8 +51,8 @@ typedef double real;
 #define mu2 0.3
 
 // tissue parameters
-#define Dx 7e-3 // check if scaling needed for the value
-#define Dy 7e-3 // check if scaling needed for the value
+#define Dx 7e-1 //7e-3 // check if scaling needed for the value
+#define Dy 7e-1  //7e-3 // check if scaling needed for the value
 
 //int numSegmentsX, numSegmentsY;
 
@@ -58,11 +64,18 @@ struct State {
 };
 
 
-
-void Write2VTK(const int n, /*State* */ real* p, const real h, const int step)
+void Write2VTK(std::string fileName, const int n, real *p, const real h, const int step)
 {
-    char fn[256];
-    sprintf(fn, "./output/res.%d.vtk", step);
+    // C style
+    //char fn[256];
+    //sprintf(fn, "./output/yni.%d.vtk", step);
+
+    // C++ style
+    std::string fn = "./output/" + fileName;
+    char fnEnding[256];
+    sprintf(fnEnding, ".%d.vtk", step);
+    std::string str_fnEnding = fnEnding;
+    fn += str_fnEnding;
 
     std::fstream f(fn, std::ios::out);
     f << "# vtk DataFile Version 3.0" << std::endl;
@@ -72,18 +85,21 @@ void Write2VTK(const int n, /*State* */ real* p, const real h, const int step)
     f << "DIMENSIONS " << n + 1 << " " << n + 1 << " 1" << std::endl;
     f << "X_COORDINATES " << n + 1 << " double" << std::endl;
     for (int i = 0; i < n + 1; i++)
+        //for (int i = 1; i < n; i++)
         f << i * h << " ";
     f << std::endl;
     f << "Y_COORDINATES " << n + 1 << " double" << std::endl;
     for (int i = 0; i < n + 1; i++)
+        //for (int i = 1; i < n; i++)
         f << i * h << " ";
     f << std::endl;
     f << "Z_COORDINATES 1 double\n0" << std::endl;
     f << "CELL_DATA " << (n * n) << std::endl;
+    //f << "CELL_DATA " << (n-2) * (n-2) << std::endl;
     f << "SCALARS V_membrane double\nLOOKUP_TABLE default" << std::endl;
-    for (int j = 0; j < n; j++) {
+    for (int j = 0; j < n; j++)
+    {
         for (int i = 0; i < n; i++)
-            //f << p[j * n + i].u << " ";
             f << p[j * n + i] << " ";
         f << std::endl;
     }
@@ -126,7 +142,7 @@ real i_Stim(int i, int j, real valueNonScaled)//, int numPointsX)
     // scaled stimulation current // 
 
     real scaling_factor2 = 12.9/100.;
-    return scaling_factor2 * valueNonScaled;
+    return (0.3)*scaling_factor2 * valueNonScaled; // 0.2 --- is "additional" amp.
 }
 
 
@@ -151,8 +167,33 @@ real RhsV(real u, real v)
     return Eps(u, v) * (-v - k * u * (u - a - 1));
 }
 
+
+real FuncSinglePeriod(real t)
+{
+    // We consider onlt t > 0! //
+
+    if (t < PeriodStim/2.)
+            return 0.;
+    else
+        return 1.;
+}
+
+
+real IsStim(real t)
+{
+   
+    // We consider only t > 0! //
+
+    // Periodic stimulation, with each stimulation's duration = LongitudeStim
+    real offset = (int)(t/PeriodStim) * PeriodStim;
+    return FuncSinglePeriod(t - offset);
+    
+    //return 1.; // stimulus is always ON
+}
+
+
 // phase calculations
-/*real*/ std::map<std::string, real> VviaPhase(real phase)
+std::map<std::string, real> VviaPhase(real phase)
 {
     // we dont need to perform memalloc for members within these structs
     State* Old = new State;
@@ -162,11 +203,12 @@ real RhsV(real u, real v)
     Old->v = 0.; // 0.067; //m_inf_CPU(VRest); // 0.5
     
 
-    real THRESHOLD = -30; // hardcoded for now
+    real THRESHOLD = -30.; //-65.; //-30; // hardcoded for now
+    real tEndTransient = 5000.; // in (ms)
     real time0;           // random value
     real time1;           // random value
     bool isThresholdFound = false;
-    real PeriodStim = 330. / 0.39; // in (ms); hardcoded for no
+    //real PeriodStim = APD0; // in (ms); hardcoded for now
 
     real tCurrent = 0;
     int counter = 0;
@@ -183,13 +225,14 @@ real RhsV(real u, real v)
         // membrane potential calc
         // variable u: "discrete diffusion" step + reaction step
         New->u = Old->u + dt_scaled * RhsU(Old->u, Old->v)
-                        + dt_scaled * ((tCurrent >= 0.) - (tCurrent > PeriodStim) + (tCurrent > 2*PeriodStim) - (tCurrent > 3*PeriodStim)) 
+                        + dt_scaled 
+                        * IsStim(tCurrent)
                         * i_Stim(0, 0, 10.); // logical operators --- account for a periodical stimulation
 
         //printf("uNew: %.2f\n", MembranePotentialReal(New->u));
         
         // when threshold is found
-        if ((MembranePotentialReal(New->u) > THRESHOLD) && (MembranePotentialReal(Old->u) < THRESHOLD))
+        if ((tCurrent >= tEndTransient) &&  (MembranePotentialReal(New->u) > THRESHOLD) && (MembranePotentialReal(Old->u) < THRESHOLD))
         {
             // when 2nd threshold time (t1) is found: set t1 and then exit the loop
             if (isThresholdFound == true)
@@ -230,9 +273,9 @@ real RhsV(real u, real v)
     //printf("First loop is finished; period of oscillations: %.2f ms\n", period);
 
     // repeat the loop (calculations) again and find V(phi)
-    tCurrent = 0; // again
+    tCurrent = 0.; // again
 
-    real tOfPhase = TimeViaPhase(phase, period, time0);
+    real tOfPhase = TimeViaPhase(phase, period, time0); // tOfPhase must be > tEndTransient
     //printf("Phase: %.2f, tOfPhase: %.2f\n", phase, tOfPhase);
     //std::cin.get();
 
@@ -248,7 +291,7 @@ real RhsV(real u, real v)
     while (1)
     {
         // it means, dat we found the moment of time, corresponding to the phase value
-        if (tCurrent >= tOfPhase)
+        if (tCurrent >= tOfPhase) // tOfPhase must be > tEndTransient
         {
             //VOfPhase = Old->V; // nearest-neighbour iterpolation; change to linear!
             stateOfPhase["u"] = Old->u;
@@ -263,9 +306,10 @@ real RhsV(real u, real v)
 
         // membrane potential calc
         // variable u: "discrete diffusion" step + reaction step
-        New->u = Old->u + dt_scaled * RhsU(Old->u, Old->v) + dt_scaled * 
-                                    ((tCurrent >= 0.) - (tCurrent > PeriodStim) + (tCurrent > 2 * PeriodStim) - (tCurrent > 3 * PeriodStim))
-                                    * i_Stim(0, 0, 10.); // logical operators --- account for a periodical stim
+        New->u = Old->u + dt_scaled * RhsU(Old->u, Old->v) 
+                        + dt_scaled 
+                         * IsStim(tCurrent)
+                         * i_Stim(0, 0, 10.); // logical operators --- account for a periodical stim
         
         tCurrent += dt;
         //stepNumber += 1;
@@ -319,7 +363,7 @@ void SetInitialConditions(real *u, real *v, real value)
             // TODO //////////////////////////////////////////////////////////////
 
             // the func returns a std::map of all the vars' values
-            std::map<std::string, real> stateForPhase = VviaPhase(phase);
+            std::map<std::string, real> stateForPhase = VviaPhase(phase); // VviaPhase(phase);
 
             //printf("Phase: %.2f deg., VOfPhase = %.2f\n", phase*180./M_PI, stateForPhase["V"]);
             //std::cin.get();
@@ -403,21 +447,34 @@ int main(int argc, char** argv) {
     //timing.open(tmp_output_file.c_str());    
 
     
-    //SetInitialConditions(old, 0., numPointsX, numPointsY);
+    // for setting IC using PHASE's calcs
     SetInitialConditions(uOld, vOld, 0.); // no "value"=0 is used for now
+    
+    // for manual setting IC for 3x3 cell tissue
+    /*
+    for (int idx = 0; idx < numPointsTotal; idx++)
+    {
+        uOld[idx] = 0;
+        vOld[idx] = 0;
+    }
 
-    // writing initial conditions to a file
+    int idxCellCentral = CalculateLinearCoordinate(1, 1);
+    uOld[idxCellCentral] = 0;
+    vOld[idxCellCentral] = 0;
+    */
+
     int counterOutput = 0;
     
     // we write initial condition in the timestepping loop
     //Write2VTK(numPointsX, old, hx, 0); // 0 --- output's file number
 
     // last preparations for the timestepping...
-    //real tCurrent = 0.;
+    real tCurrent = 0.;
     real tCurrent_scaled = 0.;
     int stepNumber = 0;
     //int counterOutput = 1;
     
+    //real PeriodStim = APD0;
 
     printf("Timestepping begins...\n");
     clock_t start = clock(); // probably, this is not the correct place to start the timer!
@@ -463,13 +520,14 @@ deviceptr(tmp)
 
                     
 		            // variable u: "discrete diffusion" step + reaction step
-                    uNew[idxCenter] = uOld[idxCenter] + dt_scaled * (
-				    	Dx  * (uOld[idxRight] - 2 * uOld[idxCenter] + uOld[idxLeft])
-		 	        + Dy  * (uOld[idxUp] - 2 * uOld[idxCenter] + uOld[idxDown])
-			        )
-			        + dt_scaled * RhsU(uOld[idxCenter], vOld[idxCenter]) 
-                    + dt_scaled * 0.*i_Stim(i, j, 10); // dont forget + I_STIM!!
-					
+                    uNew[idxCenter] = uOld[idxCenter] + dt_scaled * (Dx * (uOld[idxRight] - 2 * uOld[idxCenter] + uOld[idxLeft]) 
+                    + Dy * (uOld[idxUp] - 2 * uOld[idxCenter] + uOld[idxDown])) 
+                    + dt_scaled * RhsU(uOld[idxCenter], vOld[idxCenter]) 
+                    + dt_scaled
+                    //* (tCurrent > 4700) // for defibrillation
+                    * 0. * IsStim(tCurrent)
+                    * i_Stim(i, j, 10); // logical operators --- account for a periodical stim
+
                 } // if
 
                 // the borders: Neumann boundary conditions
@@ -503,13 +561,14 @@ deviceptr(tmp)
     if ( stepNumber % 2000 == 0) // output each 10 msec: 10/dt = 2000
     {
     //if ((stepNumber % (int)(T/100/dt)) == 0) { // 1e3 --- the number for T = 600 ms; 20 --- the number for T = 10 ms
-        #pragma acc update host(old[0:numPointsTotal])
-                Write2VTK(numPointsX, uOld, hx, counterOutput); // for now: numPointsX == numPointsY
+        #pragma acc update host(uOld[0:numPointsTotal])
+                Write2VTK("V", numPointsX, uOld, hx, stepNumber); // for now: numPointsX == numPointsY
                 
                 printf("%.2f percent is completed\n", 100*tCurrent_scaled/T_scaled);
                 counterOutput += 1;
 	}
 
+    tCurrent += dt;
     tCurrent_scaled += dt_scaled;
     stepNumber += 1;
 
@@ -519,9 +578,7 @@ deviceptr(tmp)
     ///// swap m
     tmp = vOld; vOld = vNew; vNew = tmp;
 
-    //tmp = old;
-    //old = niu;
-    //niu = tmp;
+    
 
     } // while T_scaled
 
