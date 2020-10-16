@@ -1,13 +1,13 @@
-#all: compile_cpu run
+all: compile_cpu compile_gpu
 
-compile_cpu:
-	pgcc main_ap.c -o exec_ap_cpu
+cpu:
+	pgcc main_ap.c extra.c -o exe_ap_cpu
 
-compile_gpu:
-	pgcc main_ap.c -Minfo=accel -ta=nvidia -o exec_ap_gpu
+gpu:
+	pgcc -acc -fast -Minfo=accel -ta=tesla main_ap.c extra.c -o exe_ap_gpu
 
 #run:
-#	./ap_model
+#	./exec_br_gpu
 
 clear_output:
 	rm output/*.vtk

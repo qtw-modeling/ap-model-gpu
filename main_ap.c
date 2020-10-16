@@ -1,4 +1,5 @@
 #include "common.h"
+#include "extra.h"
  
 //#include <iostream>
 //#include <map>
@@ -17,17 +18,19 @@
 
 //using namespace std;
 
-typedef double real;
+//typedef double real;
 
 //---------------------------------- grid parameters
 // FOR DEBUG: 2x2 == 3 cells x 3 cells, with 1 active cell in center other cells being ghosts
+/*
 #define numSegmentsX 100 // 20 
 #define numSegmentsY 100 // 20
 #define numPointsX (numSegmentsX + 1)
 #define numPointsY (numSegmentsY + 1)
 #define numPointsTotal (numPointsX * numPointsY)
-#define hx 0.07 // same as for YNI model // (1./numSegmentsX)
-#define hy 0.07 // same as for YNI model // (1./numSegmentsY)
+*/
+//#define hx 0.07 // same as for YNI model // (1./numSegmentsX)
+//#define hy 0.07 // same as for YNI model // (1./numSegmentsY)
 
 #define SCALING_FACTOR 12.9
 #define APD0 (330.) // in (ms)
@@ -36,12 +39,12 @@ typedef double real;
 //#define i_Stim0 (0.1/1) // for varying stim current value in various places of the programm
 
 
-#define T 7000. // endtime in (ms)
+//#define T 100. // endtime in (ms)
 #define dt 0.005 //0.005 // timestep in (ms)
 //#define dtOutput 5. // in (ms)
 // (dtOutput/dt) must be an integer number!
 
-#define T_scaled (T/SCALING_FACTOR)
+//#define T_scaled (T/SCALING_FACTOR)
 #define dt_scaled (dt/SCALING_FACTOR)
 
 // model parameters (original)
@@ -51,12 +54,17 @@ typedef double real;
 #define mu1 0.2
 #define mu2 0.3
 
-// tissue parameters
-#define Dx 7e-1 //7e-3 // check if scaling needed for the value
-#define Dy 7e-1  //7e-3 // check if scaling needed for the value
+// tissue parameters;
+// check if scaling is needed for the values below;
+// cell size is included in the diffusion coeffs. formula
+#define Dx 1. // 1. --- value from original Aliev-Panfilov article eq.; should be in [length]^2
+#define Dy 1. // same
+
+#define AREA_SIZE_X (50.) // not in mm, cm, m, ..., as the cell size is included in the diffusion coeffs. formula
+#define AREA_SIZE_Y (50.) // same
 
 // other consts
-#define M_PI acos(-1.)
+//#define M_PI acos(-1.)
 
 enum vars {u_, v_}; // for accessing arrays
 
@@ -116,14 +124,14 @@ void Write2VTK(const int n, real* p, const real h, const int step)
 }
 
 
-int CalculateLinearCoordinate_CPU(int i, int j) {
+int CalculateLinearCoordinate_CPU(int i, int j, int numPointsX) {
     // "same comment as in the function below"
     return i + j*numPointsX;
 }
 
 
 #pragma acc routine //seq //inline
-int CalculateLinearCoordinate(int i, int j)//, int numPointsX) 
+int CalculateLinearCoordinate(int i, int j, int numPointsX)//, int numPointsX) 
 {
     // this way of access to GPU global memory is optimal (but i'm not shuar)
     return i + j*numPointsX;
@@ -338,7 +346,7 @@ real IsStim(real t)
 }
 
 
-void SetInitialConditions(real *u, real *v, real value)
+void SetInitialConditions(real *u, real *v, real value, int numPointsX, int numPointsY, real hx, real hy)
 {
     int idx;
     //std::srand(unsigned(1.)); // initial seed for random number generator
@@ -349,7 +357,7 @@ void SetInitialConditions(real *u, real *v, real value)
         for (int i = 0; i < numPointsX; i++)
         {
 
-            int idxCenter = CalculateLinearCoordinate_CPU(i, j);
+            int idxCenter = CalculateLinearCoordinate_CPU(i, j, numPointsX);
             //randomNumber = ((real)(std::rand() % 20)) / 20.; // 4phase setting
 
             // for phase calculation: using angle in polar coords
@@ -371,8 +379,8 @@ void SetInitialConditions(real *u, real *v, real value)
             //std::cin.get();
             // TODO //////////////////////////////////////////////////////////////
 
-            // the func returns a std::map of all the vars' values
-            /* std::map<std::string, real> */ real* stateForPhase = VviaPhase(phase); // VviaPhase(phase);
+            // the func returns <SMTH> of all the vars' values
+            real* stateForPhase = VviaPhase(phase); // VviaPhase(phase);
 
             //printf("Phase: %.2f deg., VOfPhase = %.2f\n", phase*180./M_PI, stateForPhase["V"]);
             //std::cin.get();
@@ -381,8 +389,8 @@ void SetInitialConditions(real *u, real *v, real value)
             v[idxCenter] = stateForPhase[v_]; //0.067;//m_inf_CPU(VRest); // 0.5
             
             // for progress checking: in percents
-            printf("Set. initial cond: %.2f percent completed\n",
-                   100. * idxCenter / CalculateLinearCoordinate(numSegmentsX, numSegmentsY));
+            // printf("Set. initial cond: %.2f percent completed\n",
+            //       100. * idxCenter / CalculateLinearCoordinate((numPointsX - 1), (numPointsY - 1), numPointsX));
         }
 
     // after filling the whole area: "fill" borders wiht Neumann boundary cond.
@@ -390,21 +398,21 @@ void SetInitialConditions(real *u, real *v, real value)
     for (int j = 0; j < numPointsY; j++)
         for (int i = 0; i < numPointsX; i++)
         {
-            int idxCenter = CalculateLinearCoordinate(i, j);
+            int idxCenter = CalculateLinearCoordinate(i, j, numPointsX);
 
             // borrder cells, including corner cells
-            if (i == 0 || j == 0 || i == (numSegmentsX) || j == (numSegmentsY))
+            if (i == 0 || j == 0 || i == (numPointsX - 1) || j == (numPointsY - 1))
             {
                 int idxNear;
 
                 if ((i == 0)) //&& (j >= 1) && (j <= numSegmentsY - 1)) // left border, except for corner cells
-                    idxNear = CalculateLinearCoordinate(i + 1, j);
+                    idxNear = CalculateLinearCoordinate(i + 1, j, numPointsX);
                 if ((j == 0)) //&& (i >= 1) && (i <= numSegmentsX - 1)) // bottom, except for corner cells
-                    idxNear = CalculateLinearCoordinate(i, j + 1);
-                if ((j == numSegmentsY)) // && (i >= 1) && (i <= numSegmentsX - 1)) // top, except for corner cells
-                    idxNear = CalculateLinearCoordinate(i, j - 1);
-                if ((i == numSegmentsX)) // && (j >= 1) && (j <= numSegmentsY - 1)) // right, except for corner cells
-                    idxNear = CalculateLinearCoordinate(i - 1, j);
+                    idxNear = CalculateLinearCoordinate(i, j + 1, numPointsX);
+                if ((j == (numPointsY - 1))) // && (i >= 1) && (i <= numSegmentsX - 1)) // top, except for corner cells
+                    idxNear = CalculateLinearCoordinate(i, j - 1, numPointsX);
+                if ((i == (numPointsX - 1))) // && (j >= 1) && (j <= numSegmentsY - 1)) // right, except for corner cells
+                    idxNear = CalculateLinearCoordinate(i - 1, j, numPointsX);
 
                 // what about corner cells? for now, they are not treated (?)
                 u[idxCenter] = u[idxNear];
@@ -415,7 +423,7 @@ void SetInitialConditions(real *u, real *v, real value)
 
 
 
-int main() 
+int main(int argc, char** argv) 
 {
 
     // UNCOMMENT WHEN USING GPU
@@ -423,15 +431,23 @@ int main()
     //acc_set_device_num(1, acc_device_nvidia); // default device's number == 1
 
     // reading the params from the console
-    //int numSegmentsX = atoi(argv[1]);
-    //int numSegmentsY = atoi(argv[2]);
+    int numSegmentsX = atoi(argv[1]);
+    int numSegmentsY = numSegmentsX; // atoi(argv[2]);
     //int serieOfLaunchesNum = atoi(argv[3]);
-    //string tmp_output_file(argv[3]);
     
-    //int numPointsX = numSegmentsX + 1;
-    //int numPointsY = numSegmentsY + 1;
+    int T = atoi(argv[2]);
+    real T_scaled = T/SCALING_FACTOR;
+    // storing output file's name in char[]
+    /* string */ char tmp_output_file[256];
+    sprintf(tmp_output_file, argv[3]); 
+    
+    int numPointsX = numSegmentsX + 1;
+    int numPointsY = numSegmentsY + 1;
 
-    //int numPointsTotal = numPointsX * numPointsY;
+    int numPointsTotal = numPointsX * numPointsY;
+
+    real hx = AREA_SIZE_X / (numPointsX - 1);
+    real hy = AREA_SIZE_Y / (numPointsY - 1);
     // end UNCOMMENT WHEN USING GPU
 
     // allocating memory
@@ -458,7 +474,7 @@ int main()
 
     
     // for setting IC using PHASE's calcs
-    SetInitialConditions(uOld, vOld, 0.); // no "value"=0 is used for now
+    SetInitialConditions(uOld, vOld, 0., numPointsX, numPointsY, hx, hy); // no "value"=0 is used for now
     
     // for manual setting IC for 3x3 cell tissue
     /*
@@ -501,17 +517,21 @@ deviceptr(tmp)
         
 	
 	#pragma acc parallel \
-    present(uOld[0:numPointsTotal], vOld[0:numPointsTotal], uNew[0:numPointsTotal], vNew[0:numPointsTotal])	
+    present(uOld[0:numPointsTotal], vOld[0:numPointsTotal], uNew[0:numPointsTotal], vNew[0:numPointsTotal])	\
+    vector_length(32), num_workers(1)
 	{
 	
 	
 	// TODO: change order of indexing (i, j)
-    #pragma acc loop collapse(2) independent	
-	for (int j = 0; j < numPointsY; j++)
-	    for (int i = 0; i < numPointsX; i++) 
+    //#pragma acc loop collapse(2) independent	
+	#pragma acc loop gang
+    for (int j = 0; j < numPointsY; j++)
+    {
+	    #pragma acc loop vector
+        for (int i = 0; i < numPointsX; i++) 
         {
 
-                int idxCenter = CalculateLinearCoordinate(i, j);
+                int idxCenter = CalculateLinearCoordinate(i, j, numPointsX);
 
                 //uNew[idxCenter] = uOld[idxCenter];
 		        //vNew[idxCenter] = vOld[idxCenter];
@@ -522,18 +542,18 @@ deviceptr(tmp)
                 if (i >= 1 && j >= 1 && i <= (numSegmentsX - 1) && j <= (numSegmentsY - 1))
                 {
                     // for short names
-                    int idxUp = CalculateLinearCoordinate(i, j + 1);
-                    int idxDown = CalculateLinearCoordinate(i, j - 1);
-                    int idxLeft = CalculateLinearCoordinate(i - 1, j);
-                    int idxRight = CalculateLinearCoordinate(i + 1, j);
+                    int idxUp = CalculateLinearCoordinate(i, j + 1, numPointsX);
+                    int idxDown = CalculateLinearCoordinate(i, j - 1, numPointsX);
+                    int idxLeft = CalculateLinearCoordinate(i - 1, j, numPointsX);
+                    int idxRight = CalculateLinearCoordinate(i + 1, j, numPointsX);
 
                     ///////////////// slow variable "v": ode step
                     vNew[idxCenter] = vOld[idxCenter] + dt_scaled * RhsV(uOld[idxCenter], vOld[idxCenter]);
 
                     
 		            // variable u: "discrete diffusion" step + reaction step
-                    uNew[idxCenter] = uOld[idxCenter] + dt_scaled * (Dx * (uOld[idxRight] - 2 * uOld[idxCenter] + uOld[idxLeft]) 
-                    + Dy * (uOld[idxUp] - 2 * uOld[idxCenter] + uOld[idxDown])) 
+                    uNew[idxCenter] = uOld[idxCenter] + dt_scaled * (Dx / (hx * hx) * (uOld[idxRight] - 2 * uOld[idxCenter] + uOld[idxLeft]) 
+                    + Dy / (hy * hy) * (uOld[idxUp] - 2 * uOld[idxCenter] + uOld[idxDown])) 
                     + dt_scaled * RhsU(uOld[idxCenter], vOld[idxCenter]);
                     /* + dt_scaled
                     //* (tCurrent > 4700) // for defibrillation
@@ -549,13 +569,13 @@ deviceptr(tmp)
                     int idxNear;
 
                     if ((i == 0) && (j >= 1) && (j <= numSegmentsY - 1)) // left border, except for corner cells
-                        idxNear = CalculateLinearCoordinate(i + 1, j);
+                        idxNear = CalculateLinearCoordinate(i + 1, j, numPointsX);
                     else if ((j == 0) && (i >= 1) && (i <= numSegmentsX - 1)) // bottom, except for corner cells
-                        idxNear = CalculateLinearCoordinate(i, j + 1);
+                        idxNear = CalculateLinearCoordinate(i, j + 1, numPointsX);
                     else if ((j == numSegmentsY) && (i >= 1) && (i <= numSegmentsX - 1)) // top, except for corner cells
-                        idxNear = CalculateLinearCoordinate(i, j - 1);
+                        idxNear = CalculateLinearCoordinate(i, j - 1, numPointsX);
                     else if ((i == numSegmentsX) && (j >= 1) && (j <= numSegmentsY - 1)) // right, except for corner cells
-                        idxNear = CalculateLinearCoordinate(i - 1, j);
+                        idxNear = CalculateLinearCoordinate(i - 1, j, numPointsX);
                     else
                     {             // if corner cell
                         continue; // do nothing, continue the "i,j" loop
@@ -568,15 +588,18 @@ deviceptr(tmp)
                 }
                 
         } // for i
-	} // acc parallel
+    } // for j
+    } // acc parallel
 
     // output
-    if ( stepNumber % 2000 == 0) // output each 10 msec: 10/dt = 2000
+    if ( stepNumber % 1000 /* 2000 */ == 0) // output each 10 msec: 10/dt = 2000; each 5 msec: 5/dt = 1000
     {
     //if ((stepNumber % (int)(T/100/dt)) == 0) { // 1e3 --- the number for T = 600 ms; 20 --- the number for T = 10 ms
         #pragma acc update host(uOld[0:numPointsTotal])
-                Write2VTK(numPointsX, uOld, hx, stepNumber); // for now: numPointsX == numPointsY
                 
+                //Write2VTK(numPointsX, uOld, hx, stepNumber); // for now: numPointsX == numPointsY
+                
+                Write2VTK_2D_noGhosts(numPointsX, uOld, hx, stepNumber, u_ /* char* varName */);
                 printf("%.2f percent is completed\n", 100*tCurrent_scaled/T_scaled);
                 counterOutput += 1;
 	}
@@ -600,6 +623,11 @@ deviceptr(tmp)
     real elapsedTime = (real)( ((real)(clock() - start))/CLOCKS_PER_SEC );
     printf("\nCalculations finished. Elapsed time = %.2e sec\n", elapsedTime);
     
+    // printing elapsed time into a file
+    FILE* ff = fopen(tmp_output_file, "w");
+    fprintf(ff, "%.2f", elapsedTime);
+    fclose(ff);
+
     //timing << elapsedTime;
     //timing.close();
 
